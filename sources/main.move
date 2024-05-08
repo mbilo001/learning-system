@@ -1,214 +1,272 @@
-#[allow(unused_const)]
-module decentralized_learning_system ::decentralized_learning_system {
+module decentralized_learning_system {
+
     // Imports
-    use sui::transfer;
-    use sui::sui::SUI;
-    use sui::coin::{Self, Coin};
-    use sui::object::{Self, UID};
-    use sui::balance::{Self, Balance};
-    use sui::tx_context::{Self, TxContext};
-    use std::option::{Option, none, some, is_some, contains, borrow};
+    use 0x0::Account;
+    use 0x1::Coin;
+    use 0x2::Vector;
 
     // Errors
-    const EInvalidBooking: u64 = 1;
-    const EInvalidSession: u64 = 2;
-    const EDispute: u64 = 3;
-    const EAlreadyResolved: u64 = 4;
-    const ENotBooked: u64 = 5;
-    const EInvalidWithdrawal: u64 = 7;
-    const EAssignmentDeadlinePassed: u64 = 8;
+    const E_INVALID_BOOKING: u64 = 1;
+    const E_INVALID_SESSION: u64 = 2;
+    const E_DISPUTE: u64 = 3;
+    const E_ALREADY_RESOLVED: u64 = 4;
+    const E_NOT_BOOKED: u64 = 5;
+    const E_INVALID_WITHDRAWAL: u64 = 7;
+    const E_ASSIGNMENT_DEADLINE_PASSED: u64 = 8;
 
     // Struct definitions
-    struct LearningSession has key, store {
-        id: UID,
+    struct LearningSession {
+        id: u64,
         student: address,
         teacher: Option<address>,
-        description: vector<u8>, // Brief description of the session
-        learning_objectives: vector<u8>, // Goals or objectives of the learning session
-        materials: vector<vector<u8>>, // Learning materials (documents, links, videos, etc.)
+        description: Vector<u8>, // Brief description of the session
+        learning_objectives: Vector<u8>, // Goals or objectives of the learning session
+        materials: Vector<Vector<u8>>, // Learning materials (documents, links, videos, etc.)
         price: u64,
-        escrow: Balance<SUI>,
-        sessionScheduled: bool,
+        escrow: Coin,
+        session_scheduled: bool,
         dispute: bool,
         progress: u8, // Progress of the session (0-100%)
-        feedback: Option<vector<u8>>, // Feedback provided by the student
+        feedback: Option<Vector<u8>>, // Feedback provided by the student
         rating: Option<u8>, // Rating provided by the student
-        sessionDeadline: Option<u64>, // Deadline for the learning session
-        assignmentDeadline: Option<u64>, // Deadline for assignments related to the session
+        session_deadline: Option<u64>, // Deadline for the learning session
+        assignment_deadline: Option<u64>, // Deadline for assignments related to the session
     }
 
     // Public - Entry functions
 
     // Function to book a learning session
-    public entry fun book_learning_session(description: vector<u8>, learning_objectives: vector<u8>, materials: vector<vector<u8>>, price: u64, ctx: &mut TxContext) {
-        let session_id = object::new(ctx);
-        transfer::share_object(LearningSession {
+    public fun book_learning_session(description: Vector<u8>, learning_objectives: Vector<u8>, materials: Vector<Vector<u8>>, price: u64, ctx: &signer) {
+        let session_id = get_new_session_id();
+        let student = get_txn_sender_address(ctx);
+        let session = LearningSession {
             id: session_id,
-            student: tx_context::sender(ctx),
-            teacher: none(), // Set to an initial value, can be updated later
+            student: student,
+            teacher: None,
             description: description,
             learning_objectives: learning_objectives,
             materials: materials,
             price: price,
-            escrow: balance::zero(),
-            sessionScheduled: false,
+            escrow: Coin::new(0), // Initialize escrow with zero balance
+            session_scheduled: false,
             dispute: false,
             progress: 0,
-            feedback: none(),
-            rating: none(),
-            sessionDeadline: none(), // Initialize to none
-            assignmentDeadline: none(), // Initialize to none
-        });
+            feedback: None,
+            rating: None,
+            session_deadline: None,
+            assignment_deadline: None,
+        };
+        save_learning_session(session_id, &session);
     }
 
     // Function to request a learning session
-    public entry fun request_learning_session(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(!is_some(&learning_session.teacher), EInvalidBooking);
-        learning_session.teacher = some(tx_context::sender(ctx));
+    public fun request_learning_session(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.teacher.is_none(), E_INVALID_BOOKING);
+        session.teacher = Some(get_txn_sender_address(ctx));
+        save_learning_session(session_id, &session);
     }
 
     // Function to submit a learning session
-    public entry fun submit_learning_session(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(contains(&learning_session.teacher, &tx_context::sender(ctx)), EInvalidSession);
-        learning_session.sessionScheduled = true;
+    public fun submit_learning_session(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(Some(get_txn_sender_address(ctx)), session.teacher, E_INVALID_SESSION);
+        session.session_scheduled = true;
+        save_learning_session(session_id, &session);
     }
 
     // Function to dispute a learning session
-    public entry fun dispute_learning_session(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx), EDispute);
-        learning_session.dispute = true;
+    public fun dispute_learning_session(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx), E_DISPUTE);
+        session.dispute = true;
+        save_learning_session(session_id, &session);
     }
 
     // Function to resolve a learning session dispute
-    public entry fun resolve_learning_session(learning_session: &mut LearningSession, resolved: bool, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx), EDispute);
-        assert!(learning_session.dispute, EAlreadyResolved);
-        assert!(is_some(&learning_session.teacher), EInvalidBooking);
-        let escrow_amount = balance::value(&learning_session.escrow);
-        let escrow_coin = coin::take(&mut learning_session.escrow, escrow_amount, ctx);
-        if (resolved) {
-            let teacher = *borrow(&learning_session.teacher);
-            // Transfer funds to the teacher
-            transfer::public_transfer(escrow_coin, teacher);
+    public fun resolve_learning_session(session_id: u64, resolved: bool, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx), E_DISPUTE);
+        assert!(session.dispute, E_ALREADY_RESOLVED);
+        assert!(session.teacher.is_some(), E_INVALID_BOOKING);
+        let escrow_amount = session.escrow;
+        if resolved {
+            let teacher = session.teacher.unwrap();
+            transfer_funds(escrow_amount, teacher);
         } else {
-            // Refund funds to the student
-            transfer::public_transfer(escrow_coin, learning_session.student);
-        };
-
-        // Reset session state
-        learning_session.teacher = none();
-        learning_session.sessionScheduled = false;
-        learning_session.dispute = false;
+            transfer_funds(escrow_amount, session.student);
+        }
+        session.teacher = None;
+        session.session_scheduled = false;
+        session.dispute = false;
+        save_learning_session(session_id, &session);
     }
 
     // Function to release payment for a learning session
-    public entry fun release_payment(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx), ENotBooked);
-        assert!(learning_session.sessionScheduled && !learning_session.dispute, EInvalidSession);
-        assert!(is_some(&learning_session.teacher), EInvalidBooking);
-        let teacher = *borrow(&learning_session.teacher);
-        let escrow_amount = balance::value(&learning_session.escrow);
-        let escrow_coin = coin::take(&mut learning_session.escrow, escrow_amount, ctx);
-        // Transfer funds to the teacher
-        transfer::public_transfer(escrow_coin, teacher);
-
-        // Reset session state
-        learning_session.teacher = none();
-        learning_session.sessionScheduled = false;
-        learning_session.dispute = false;
+    public fun release_payment(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx), E_NOT_BOOKED);
+        assert!(session.session_scheduled && !session.dispute, E_INVALID_SESSION);
+        assert!(session.teacher.is_some(), E_INVALID_BOOKING);
+        let teacher = session.teacher.unwrap();
+        let escrow_amount = session.escrow;
+        transfer_funds(escrow_amount, teacher);
+        session.teacher = None;
+        session.session_scheduled = false;
+        session.dispute = false;
+        save_learning_session(session_id, &session);
     }
 
     // Function to add funds to a learning session
-    public entry fun add_funds_to_session(learning_session: &mut LearningSession, amount: Coin<SUI>, ctx: &mut TxContext) {
-        assert!(tx_context::sender(ctx) == learning_session.student, ENotBooked);
-        let added_balance = coin::into_balance(amount);
-        balance::join(&mut learning_session.escrow, added_balance);
+    public fun add_funds_to_session(session_id: u64, amount: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(get_txn_sender_address(ctx), session.student, E_NOT_BOOKED);
+        session.escrow += amount;
+        save_learning_session(session_id, &session);
     }
 
     // Function to request a refund for a learning session
-    public entry fun request_refund(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(tx_context::sender(ctx) == learning_session.student, ENotBooked);
-        assert!(learning_session.sessionScheduled == false, EInvalidWithdrawal);
-        let escrow_amount = balance::value(&learning_session.escrow);
-        let escrow_coin = coin::take(&mut learning_session.escrow, escrow_amount, ctx);
-        // Refund funds to the student
-        transfer::public_transfer(escrow_coin, learning_session.student);
-
-        // Reset session state
-        learning_session.teacher = none();
-        learning_session.sessionScheduled = false;
-        learning_session.dispute = false;
+    public fun request_refund(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(get_txn_sender_address(ctx), session.student, E_NOT_BOOKED);
+        assert!(!session.session_scheduled, E_INVALID_WITHDRAWAL);
+        let escrow_amount = session.escrow;
+        transfer_funds(escrow_amount, session.student);
+        session.teacher = None;
+        session.session_scheduled = false;
+        session.dispute = false;
+        save_learning_session(session_id, &session);
     }
 
     // Function to mark a session as complete
-    public entry fun mark_session_complete(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-        learning_session.sessionScheduled = true;
+    public fun mark_session_complete(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        session.session_scheduled = true;
         // Additional logic to mark the session as complete
+        save_learning_session(session_id, &session);
     }
 
     // Function to cancel a learning session
-    public entry fun cancel_learning_session(learning_session: &mut LearningSession, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) || contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-
-        // Refund funds to the student if not yet paid
-        if (is_some(&learning_session.teacher) && !learning_session.sessionScheduled && !learning_session.dispute) {
-            let escrow_amount = balance::value(&learning_session.escrow);
-            let escrow_coin = coin::take(&mut learning_session.escrow, escrow_amount, ctx);
-            transfer::public_transfer(escrow_coin, learning_session.student);
-        };
-
-        // Reset session state
-        learning_session.teacher = none();
-        learning_session.sessionScheduled = false;
-        learning_session.dispute = false;
+    public fun cancel_learning_session(session_id: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.student == get_txn_sender_address(ctx) || Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        if session.teacher.is_some() && !session.session_scheduled && !session.dispute {
+            let escrow_amount = session.escrow;
+            transfer_funds(escrow_amount, session.student);
+        }
+        session.teacher = None;
+        session.session_scheduled = false;
+        session.dispute = false;
+        save_learning_session(session_id, &session);
     }
 
     // Function to update session description
-    public entry fun update_session_description(learning_session: &mut LearningSession, new_description: vector<u8>, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx), ENotBooked);
-        learning_session.description = new_description;
+    public fun update_session_description(session_id: u64, new_description: Vector<u8>, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx), E_NOT_BOOKED);
+        session.description = new_description;
+        save_learning_session(session_id, &session);
     }
 
     // Function to update session price
-    public entry fun update_session_price(learning_session: &mut LearningSession, new_price: u64, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx), ENotBooked);
-        learning_session.price = new_price;
+    public fun update_session_price(session_id: u64, new_price: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx), E_NOT_BOOKED);
+        session.price = new_price;
+        save_learning_session(session_id, &session);
     }
 
     // Function to provide feedback
-    public entry fun provide_feedback(learning_session: &mut LearningSession, feedback: vector<u8>, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) && learning_session.sessionScheduled, ENotBooked);
-        learning_session.feedback = some(feedback);
+    public fun provide_feedback(session_id: u64, feedback: Vector<u8>, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx) && session.session_scheduled, E_NOT_BOOKED);
+        session.feedback = Some(feedback);
+        save_learning_session(session_id, &session);
     }
 
     // Function to provide rating
-    public entry fun provide_rating(learning_session: &mut LearningSession, rating: u8, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) && learning_session.sessionScheduled, ENotBooked);
-        learning_session.rating = some(rating);
+    public fun provide_rating(session_id: u64, rating: u8, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert_eq!(session.student, get_txn_sender_address(ctx) && session.session_scheduled, E_NOT_BOOKED);
+        session.rating = Some(rating);
+        save_learning_session(session_id, &session);
     }
 
     // Function to set the deadline for the learning session
-    public entry fun set_session_deadline(learning_session: &mut LearningSession, deadline: u64, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) || contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-        learning_session.sessionDeadline = some(deadline);
+    public fun set_session_deadline(session_id: u64, deadline: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.student == get_txn_sender_address(ctx) || Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        session.session_deadline = Some(deadline);
+        save_learning_session(session_id, &session);
     }
 
     // Function to set the deadline for assignments related to the learning session
-    public entry fun set_assignment_deadline(learning_session: &mut LearningSession, deadline: u64, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) || contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-        learning_session.assignmentDeadline = some(deadline);
+    public fun set_assignment_deadline(session_id: u64, deadline: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.student == get_txn_sender_address(ctx) || Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        session.assignment_deadline = Some(deadline);
+        save_learning_session(session_id, &session);
     }
 
     // Function to update the deadline for the learning session
-    public entry fun update_session_deadline(learning_session: &mut LearningSession, new_deadline: u64, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) || contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-        learning_session.sessionDeadline = some(new_deadline);
+    public fun update_session_deadline(session_id: u64, new_deadline: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.student == get_txn_sender_address(ctx) || Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        session.session_deadline = Some(new_deadline);
+        save_learning_session(session_id, &session);
     }
 
     // Function to update the deadline for assignments related to the learning session
-    public entry fun update_assignment_deadline(learning_session: &mut LearningSession, new_deadline: u64, ctx: &mut TxContext) {
-        assert!(learning_session.student == tx_context::sender(ctx) || contains(&learning_session.teacher, &tx_context::sender(ctx)), ENotBooked);
-        learning_session.assignmentDeadline = some(new_deadline);
+    public fun update_assignment_deadline(session_id: u64, new_deadline: u64, ctx: &signer) {
+        let mut session = get_learning_session(session_id);
+        assert!(session.student == get_txn_sender_address(ctx) || Some(get_txn_sender_address(ctx)) == session.teacher, E_NOT_BOOKED);
+        session.assignment_deadline = Some(new_deadline);
+        save_learning_session(session_id, &session);
+    }
+
+    // Internal functions
+
+    // Function to generate a new session ID
+    private fun get_new_session_id(): u64 {
+        // Logic to generate a unique session ID
+        // For simplicity, let's assume it increments by 1 for each new session
+        // In a real implementation, this should be more robust to ensure uniqueness
+        0 // Placeholder, replace with actual implementation
+    }
+
+    // Function to save a learning session to the storage
+    private fun save_learning_session(session_id: u64, session: &LearningSession) {
+        // Logic to save the learning session to the storage
+        // Placeholder for storage interaction
+    }
+
+    // Function to retrieve a learning session from the storage
+    private fun get_learning_session(session_id: u64): LearningSession {
+        // Logic to retrieve the learning session from the storage
+        // Placeholder for storage interaction
+        LearningSession {
+            id: session_id,
+            student: 0x0, // Placeholder address
+            teacher: None,
+            description: Vector::empty(),
+            learning_objectives: Vector::empty(),
+            materials: Vector::empty(),
+            price: 0,
+            escrow: Coin::new(0),
+            session_scheduled: false,
+            dispute: false,
+            progress: 0,
+            feedback: None,
+            rating: None,
+            session_deadline: None,
+            assignment_deadline: None,
+        }
+    }
+
+    // Function to transfer funds
+    private fun transfer_funds(amount: Coin, recipient: address) {
+        // Logic to transfer funds to the recipient
+        // Placeholder for fund transfer
     }
 }
